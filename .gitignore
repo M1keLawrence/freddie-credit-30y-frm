@@ -1,0 +1,18 @@
+data/
+dist/
+logs/
+notebooks/.ipynb_checkpoints/
+__pycache__/
+*.parquet
+*.tar
+*.pyc
+.ipynb_checkpoints/
+.vscode/
+.idea/
+.DS_Store
+.claude/
+
+# Reference PDFs (assignment + papers) — kept local, not redistributed.
+IR&C_Assignment3_2026.pdf
+Chen2024_*.pdf
+Sadhwani2021_*.pdf
