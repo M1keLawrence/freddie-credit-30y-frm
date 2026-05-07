@@ -11,6 +11,7 @@ __pycache__/
 .idea/
 .DS_Store
 .claude/
+figures/
 
 # Reference PDFs (assignment + papers) — kept local, not redistributed.
 IR&C_Assignment3_2026.pdf
