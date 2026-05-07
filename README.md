@@ -21,6 +21,8 @@ This repo ships:
 - `scripts/` – data-pipeline entry points (zip → Parquet, outcomes, FRED).
 - `src/credit_data.py` – one-line loaders for the processed tables.
 - `src/schemas.py` – column / dtype / sentinel definitions.
+- [`DATA.md`](DATA.md) – per-column reference, join keys, sentinel map.
+- [`notebooks/quickstart.ipynb`](notebooks/quickstart.ipynb) – 5-section tour of the loaders with plots.
 
 The pipeline output is ~6–10 GB of ZSTD-compressed Parquet, partitioned by
 `vintage_year`. Loaders use predicate pushdown so vintage-stratified work
