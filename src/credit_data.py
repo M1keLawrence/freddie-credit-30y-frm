@@ -16,14 +16,19 @@ Quick examples:
     orig = load_origination(years=[2006, 2007],
                             columns=["loan_seq_num", "fico", "ltv", "dti", "orig_rate"])
 
-    # 3. XGBoost training set with macro joined in
+    # 3. Origination + outcomes in one shot (per-loan training set)
+    loans = load_loans(years=[2006, 2007],
+                       columns=["loan_seq_num", "fico", "ltv", "dti", "orig_rate",
+                                "event_type", "event_time_months"])
+
+    # 4. XGBoost training set with macro joined in
     monthly = load_monthly(years=[2010], columns=["loan_seq_num", "month",
                                                    "current_rate", "actual_upb",
                                                    "dq_status", "loan_age"])
     macro = load_macro()
     train = monthly.join(macro, on="month", how="left")
 
-    # 4. Streaming for very wide vintages
+    # 5. Streaming for very wide vintages
     lf = load_monthly(years=list(range(2006, 2024)), lazy=True)
     big = lf.filter(pl.col("dq_status") != "0").collect(streaming=True)
 """
@@ -118,6 +123,42 @@ def load_outcomes(
 ) -> pl.DataFrame | pl.LazyFrame:
     """Load the per-loan outcome / event table."""
     return _load("outcomes", years, columns, lazy)
+
+
+def load_loans(
+    years: Iterable[int] | None = None,
+    columns: Sequence[str] | None = None,
+    lazy: bool = False,
+) -> pl.DataFrame | pl.LazyFrame:
+    """Origination LEFT JOIN outcomes on loan_seq_num.
+
+    Convenience for the very common per-loan workflow that wants both the
+    origination features (X) and the realized event (y) in one frame. The
+    underlying tables stay separate on disk; this just hides the join.
+
+    Notes:
+      - Left join from origination, so every originated loan appears even
+        when its outcome row is empty (rare; only happens for loans
+        without any monthly observation yet).
+      - vintage_year / vintage_quarter come from origination (outcomes'
+        copies are dropped to avoid suffixing).
+    """
+    o_paths = _vintage_globs("origination", list(years) if years is not None else None)
+    e_paths = _vintage_globs("outcomes", list(years) if years is not None else None)
+    if not o_paths:
+        raise FileNotFoundError(
+            f"No 'origination' partitions found under {PROCESSED_DIR / 'origination'}."
+        )
+    if not e_paths:
+        raise FileNotFoundError(
+            f"No 'outcomes' partitions found under {PROCESSED_DIR / 'outcomes'}."
+        )
+    o = pl.scan_parquet(o_paths)
+    e = pl.scan_parquet(e_paths).drop(["vintage_year", "vintage_quarter"])
+    lf = o.join(e, on="loan_seq_num", how="left")
+    if columns is not None:
+        lf = lf.select(columns)
+    return lf if lazy else lf.collect()
 
 
 def load_macro(lazy: bool = False) -> pl.DataFrame | pl.LazyFrame:

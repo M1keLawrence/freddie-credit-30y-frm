@@ -44,15 +44,31 @@ dataset.
 ## Loaders (`src/credit_data.py`)
 
 ```python
-from src.credit_data import load_origination, load_monthly, load_outcomes, load_macro
+from src.credit_data import (
+    load_origination, load_monthly, load_outcomes, load_macro, load_loans,
+)
 
 orig    = load_origination(years=[2006, 2007], columns=[...])     # eager
 out     = load_outcomes(years=None)                                # all vintages
 macro   = load_macro()
 monthly = load_monthly(years=[2010], columns=[...], lazy=True)     # always prefer lazy
+
+# Convenience: origination + outcomes joined on loan_seq_num.
+# One row per loan with both features (X) and event (y).
+loans   = load_loans(years=[2006, 2007],
+                     columns=["loan_seq_num", "fico", "ltv", "dti",
+                              "orig_rate", "event_type", "event_time_months"])
 ```
 
-All four use parquet partition pruning so unrequested years are not read.
+All loaders use parquet partition pruning so unrequested years are not read.
+
+> **Why isn't this two tables merged on disk?** `origination/` is static
+> (raw → typed → filtered, never re-derived); `outcomes/` is a derived
+> table that gets rewritten whenever the event-classification rules
+> change. Keeping them separate localizes the blast radius of those
+> changes, keeps features and labels in distinct files (helpful for
+> avoiding label leakage), and lets pure-X or pure-y queries scan less
+> data. `load_loans()` papers over the join when you actually want both.
 
 ---
 
