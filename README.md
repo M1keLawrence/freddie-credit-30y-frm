@@ -18,11 +18,51 @@ rather than mixed into in-sample estimation.
 
 This repo ships:
 
-- `scripts/` – data-pipeline entry points (zip → Parquet, outcomes, FRED).
+- `scripts/` – data-pipeline entry points (zip → Parquet, outcomes, FRED) **and analysis scripts**.
 - `src/credit_data.py` – one-line loaders for the processed tables.
 - `src/schemas.py` – column / dtype / sentinel definitions.
 - [`DATA.md`](DATA.md) – per-column reference, join keys, sentinel map.
 - [`notebooks/quickstart.ipynb`](notebooks/quickstart.ipynb) – 5-section tour of the loaders with plots.
+
+## Analysis scripts (IR&C Assignment 3)
+
+### Part A — Exploratory Survival Analysis (`notebooks/partA_survival.ipynb`)
+
+Kaplan-Meier survival estimates, implied hazard rates, and stratified curves across
+FICO, LTV, DTI, orig_rate, loan purpose, channel, and vintage. Also includes:
+- Aalen-Johansen competing-risks CIF (prepayment vs. default vs. other)
+- Bin-free univariate Cox ranking vs. log-rank test comparison
+- Age × calendar-year heatmap of monthly prepayment rates
+
+Output figures are written to `figures/partA_*.png`.
+
+### Part B — Classical Cox Modeling (`scripts/partB_cox.py`)
+
+Cox proportional hazards model for prepayment. Runs two models:
+
+1. **Static model** — origination features only (FICO, LTV, DTI, orig_rate, loan purpose, channel, n_borrowers, vintage_year)
+2. **Macro model** — adds FRED covariates joined at origination month: rate incentive (orig_rate − MORTGAGE30US), mortgage/Treasury spread, unemployment, log HPI, log CPI
+
+Also produces:
+- Forest plots of hazard ratios with 95% CI
+- Breslow baseline hazard and survival curves
+- Schoenfeld residuals test (PH assumption)
+- Log-log survival plots for FICO, LTV, orig_rate
+
+```bash
+# Full run — 2006-2022 in-sample, 2M loan sample
+python scripts/partB_cox.py
+
+# Quick test on a small subset
+python scripts/partB_cox.py --years 2006 2007 --sample 50000
+
+# Skip macro model
+python scripts/partB_cox.py --skip-macro
+```
+
+Output figures are written to `figures/partB_*.png` and `figures/partB_*.csv`.
+
+**Train/test split:** 2006–2022 in-sample; 2024–2025 held out (2023 H2 absent upstream).
 
 The pipeline output is ~6–10 GB of ZSTD-compressed Parquet, partitioned by
 `vintage_year`. Loaders use predicate pushdown so vintage-stratified work
