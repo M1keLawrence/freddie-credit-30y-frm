@@ -231,15 +231,40 @@ class PreparedClassicalCoxData:
     dropped_reference_columns: list[str]
 
 
-def prepare_survival_splits(
-    train_df: pd.DataFrame,
-    val_df: pd.DataFrame,
-    test_df: pd.DataFrame,
-    time_col: str,
+@dataclass
+class SurvivalFeaturePreprocessor:
+    feature_names: list[str]
+    numeric_columns: list[str]
+    categorical_columns: list[str]
+    categorical_feature_names: list[str]
+    numeric_fill_values: pd.Series
+    scaler: StandardScaler | None
+
+
+def split_train_validation_dataframe(
+    df: pd.DataFrame,
     event_col: str,
+    val_size: float = 0.15,
+    random_state: int = 42,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if val_size <= 0 or val_size >= 1:
+        raise ValueError("Use 0 < val_size < 1 for a train/validation split.")
+
+    stratify = _safe_stratify(df[event_col])
+    train_df, val_df = train_test_split(
+        df,
+        test_size=val_size,
+        random_state=random_state,
+        stratify=stratify,
+    )
+    return train_df.reset_index(drop=True), val_df.reset_index(drop=True)
+
+
+def fit_survival_preprocessor(
+    train_df: pd.DataFrame,
     feature_cols: Sequence[str],
     categorical_cols: Sequence[str] | None = None,
-) -> PreparedSurvivalData:
+) -> SurvivalFeaturePreprocessor:
     feature_cols = list(feature_cols)
     categorical_cols = (
         list(categorical_cols)
@@ -256,61 +281,118 @@ def prepare_survival_splits(
 
     if numeric_cols:
         train_num_raw = train_df[numeric_cols].apply(pd.to_numeric, errors="coerce")
-        medians = train_num_raw.median()
-        scaler = StandardScaler().fit(train_num_raw.fillna(medians))
-
-        def _transform_numeric(df: pd.DataFrame) -> pd.DataFrame:
-            numeric = df[numeric_cols].apply(pd.to_numeric, errors="coerce").fillna(medians)
-            values = scaler.transform(numeric)
-            return pd.DataFrame(values, columns=numeric_cols, index=df.index)
-
-        train_num = _transform_numeric(train_df)
-        val_num = _transform_numeric(val_df)
-        test_num = _transform_numeric(test_df)
+        fill_values = train_num_raw.median()
+        scaler: StandardScaler | None = StandardScaler().fit(train_num_raw.fillna(fill_values))
     else:
-        train_num = pd.DataFrame(index=train_df.index)
-        val_num = pd.DataFrame(index=val_df.index)
-        test_num = pd.DataFrame(index=test_df.index)
+        fill_values = pd.Series(dtype=np.float64)
+        scaler = None
 
-    def _prepare_categorical(df: pd.DataFrame, train_columns: Sequence[str] | None = None):
-        if not categorical_cols:
-            return pd.DataFrame(index=df.index)
-
+    if categorical_cols:
         categorical = (
-            df[categorical_cols]
+            train_df[categorical_cols]
             .fillna("__missing__")
             .astype("string")
         )
-        encoded = pd.get_dummies(categorical, columns=categorical_cols, dtype=float)
-        if train_columns is not None:
-            encoded = encoded.reindex(columns=train_columns, fill_value=0.0)
-        return encoded
+        categorical_feature_names = list(
+            pd.get_dummies(categorical, columns=categorical_cols, dtype=float).columns
+        )
+    else:
+        categorical_feature_names = []
 
-    train_cat = _prepare_categorical(train_df)
-    val_cat = _prepare_categorical(val_df, train_columns=train_cat.columns)
-    test_cat = _prepare_categorical(test_df, train_columns=train_cat.columns)
+    feature_names = numeric_cols + categorical_feature_names
+    return SurvivalFeaturePreprocessor(
+        feature_names=feature_names,
+        numeric_columns=numeric_cols,
+        categorical_columns=categorical_cols,
+        categorical_feature_names=categorical_feature_names,
+        numeric_fill_values=fill_values,
+        scaler=scaler,
+    )
 
-    x_train = pd.concat([train_num, train_cat], axis=1).astype(np.float32)
-    x_val = pd.concat([val_num, val_cat], axis=1).astype(np.float32)
-    x_test = pd.concat([test_num, test_cat], axis=1).astype(np.float32)
 
-    feature_names = list(x_train.columns)
-    x_val = x_val.reindex(columns=feature_names, fill_value=0.0)
-    x_test = x_test.reindex(columns=feature_names, fill_value=0.0)
+def transform_survival_features(
+    df: pd.DataFrame,
+    preprocessor: SurvivalFeaturePreprocessor,
+) -> pd.DataFrame:
+    if preprocessor.numeric_columns:
+        numeric = (
+            df[preprocessor.numeric_columns]
+            .apply(pd.to_numeric, errors="coerce")
+            .fillna(preprocessor.numeric_fill_values)
+        )
+        assert preprocessor.scaler is not None
+        numeric_values = preprocessor.scaler.transform(numeric)
+        numeric_frame = pd.DataFrame(
+            numeric_values,
+            columns=preprocessor.numeric_columns,
+            index=df.index,
+        )
+    else:
+        numeric_frame = pd.DataFrame(index=df.index)
+
+    if preprocessor.categorical_columns:
+        categorical = (
+            df[preprocessor.categorical_columns]
+            .fillna("__missing__")
+            .astype("string")
+        )
+        categorical_frame = pd.get_dummies(
+            categorical,
+            columns=preprocessor.categorical_columns,
+            dtype=float,
+        ).reindex(columns=preprocessor.categorical_feature_names, fill_value=0.0)
+    else:
+        categorical_frame = pd.DataFrame(index=df.index)
+
+    x = pd.concat([numeric_frame, categorical_frame], axis=1).astype(np.float32)
+    return x.reindex(columns=preprocessor.feature_names, fill_value=0.0)
+
+
+def extract_survival_targets(
+    df: pd.DataFrame,
+    time_col: str,
+    event_col: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    return (
+        df[time_col].to_numpy(dtype=np.float32),
+        df[event_col].to_numpy(dtype=np.float32),
+    )
+
+
+def prepare_survival_splits(
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    time_col: str,
+    event_col: str,
+    feature_cols: Sequence[str],
+    categorical_cols: Sequence[str] | None = None,
+) -> PreparedSurvivalData:
+    preprocessor = fit_survival_preprocessor(
+        train_df=train_df,
+        feature_cols=feature_cols,
+        categorical_cols=categorical_cols,
+    )
+    x_train = transform_survival_features(train_df, preprocessor)
+    x_val = transform_survival_features(val_df, preprocessor)
+    x_test = transform_survival_features(test_df, preprocessor)
+    t_train, e_train = extract_survival_targets(train_df, time_col, event_col)
+    t_val, e_val = extract_survival_targets(val_df, time_col, event_col)
+    t_test, e_test = extract_survival_targets(test_df, time_col, event_col)
 
     return PreparedSurvivalData(
         x_train=x_train,
         x_val=x_val,
         x_test=x_test,
-        t_train=train_df[time_col].to_numpy(dtype=np.float32),
-        t_val=val_df[time_col].to_numpy(dtype=np.float32),
-        t_test=test_df[time_col].to_numpy(dtype=np.float32),
-        e_train=train_df[event_col].to_numpy(dtype=np.float32),
-        e_val=val_df[event_col].to_numpy(dtype=np.float32),
-        e_test=test_df[event_col].to_numpy(dtype=np.float32),
-        feature_names=feature_names,
-        numeric_columns=numeric_cols,
-        categorical_columns=categorical_cols,
+        t_train=t_train,
+        t_val=t_val,
+        t_test=t_test,
+        e_train=e_train,
+        e_val=e_val,
+        e_test=e_test,
+        feature_names=preprocessor.feature_names,
+        numeric_columns=preprocessor.numeric_columns,
+        categorical_columns=preprocessor.categorical_columns,
     )
 
 
@@ -338,6 +420,13 @@ def prepare_classical_cox_splits(
         x_test=x_test.drop(columns=dropped_reference_columns, errors="ignore").copy(),
         dropped_reference_columns=dropped_reference_columns,
     )
+
+
+def prepare_classical_cox_frame(
+    x: pd.DataFrame,
+    dropped_reference_columns: Sequence[str],
+) -> pd.DataFrame:
+    return x.drop(columns=list(dropped_reference_columns), errors="ignore").copy()
 
 
 class DeepCox(nn.Module):
@@ -551,6 +640,29 @@ def predict_classical_cox_log_risk(model, x: pd.DataFrame) -> np.ndarray:
     if isinstance(log_risk, pd.Series):
         return log_risk.to_numpy(dtype=float)
     return np.asarray(log_risk, dtype=float).reshape(-1)
+
+
+def predict_deep_cox_log_risk_batched(
+    model: DeepCox,
+    x: pd.DataFrame | np.ndarray,
+    batch_size: int = 200_000,
+) -> np.ndarray:
+    if batch_size <= 0:
+        raise ValueError("batch_size must be a positive integer.")
+
+    if isinstance(x, pd.DataFrame):
+        values = x.to_numpy(dtype=np.float32, copy=False)
+    else:
+        values = np.asarray(x, dtype=np.float32)
+
+    outputs: list[np.ndarray] = []
+    model.eval()
+    with torch.no_grad():
+        for start in range(0, values.shape[0], batch_size):
+            stop = min(start + batch_size, values.shape[0])
+            batch = torch.tensor(values[start:stop], dtype=torch.float32)
+            outputs.append(model(batch).detach().cpu().numpy().reshape(-1))
+    return np.concatenate(outputs, axis=0)
 
 
 def train_deep_cox(
@@ -800,6 +912,55 @@ def estimate_breslow_baseline_hazard(
     baseline["baseline_cumulative_hazard"] = baseline["baseline_hazard"].cumsum()
     baseline["baseline_survival"] = np.exp(-baseline["baseline_cumulative_hazard"])
     return baseline
+
+
+def _baseline_cumulative_hazard_frame(
+    baseline_hazard: pd.DataFrame | pd.Series,
+) -> pd.DataFrame:
+    if isinstance(baseline_hazard, pd.Series):
+        frame = baseline_hazard.to_frame(name="baseline_cumulative_hazard").reset_index()
+        frame.columns = ["time", "baseline_cumulative_hazard"]
+        return frame
+
+    if {"time", "baseline_cumulative_hazard"}.issubset(baseline_hazard.columns):
+        return baseline_hazard[["time", "baseline_cumulative_hazard"]].copy()
+
+    if baseline_hazard.shape[1] != 1:
+        raise ValueError(
+            "baseline_hazard must have exactly one cumulative-hazard column when `time` "
+            "and `baseline_cumulative_hazard` are not provided."
+        )
+
+    frame = baseline_hazard.reset_index().copy()
+    frame.columns = ["time", "baseline_cumulative_hazard"]
+    return frame
+
+
+def baseline_cumulative_hazard_at_horizon(
+    baseline_hazard: pd.DataFrame | pd.Series,
+    horizon: float,
+) -> float:
+    frame = _baseline_cumulative_hazard_frame(baseline_hazard)
+    times = frame["time"].to_numpy(dtype=float)
+    cumulative_hazard = frame["baseline_cumulative_hazard"].to_numpy(dtype=float)
+    idx = int(np.searchsorted(times, float(horizon), side="right") - 1)
+    if idx < 0:
+        return 0.0
+    return float(cumulative_hazard[idx])
+
+
+def predict_event_probability_at_horizon(
+    baseline_hazard: pd.DataFrame | pd.Series,
+    log_risk: Sequence[float],
+    horizon: float,
+) -> np.ndarray:
+    horizon_cumulative_hazard = baseline_cumulative_hazard_at_horizon(
+        baseline_hazard=baseline_hazard,
+        horizon=horizon,
+    )
+    risk_multiplier = np.exp(np.asarray(log_risk, dtype=float))
+    survival_probability = np.exp(-horizon_cumulative_hazard * risk_multiplier)
+    return 1.0 - survival_probability
 
 
 def predict_survival_curves(
