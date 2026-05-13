@@ -12,6 +12,8 @@ __pycache__/
 .DS_Store
 .claude/
 figures/
+figures-results-B/
+*.pkl
 
 # Reference PDFs (assignment + papers) — kept local, not redistributed.
 IR&C_Assignment3_2026.pdf

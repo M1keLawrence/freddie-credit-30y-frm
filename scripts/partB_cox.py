@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import pickle
 import sys
 from pathlib import Path
 
@@ -330,6 +331,20 @@ def plot_baseline_hazard(cph: CoxPHFitter, title: str, save_path: Path) -> None:
     print(f"  saved: {save_path.name}")
 
 
+# ── Model cache helpers ─────────────────────────────────────────────────────────
+
+def save_model(cph: CoxPHFitter, path: str) -> None:
+    with open(path, "wb") as f:
+        pickle.dump(cph, f)
+    print(f"  model cached: {path}")
+
+
+def load_model(path: str) -> CoxPHFitter:
+    print(f"  loading cached model: {path}")
+    with open(path, "rb") as f:
+        return pickle.load(f)
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def parse_args() -> argparse.Namespace:
@@ -342,6 +357,12 @@ def parse_args() -> argparse.Namespace:
                    help="L2 penalizer for CoxPHFitter (default: 0.1)")
     p.add_argument("--skip-macro", action="store_true",
                    help="Skip the macro-covariate model (step iv)")
+    p.add_argument("--save-model", type=str, default=None, metavar="PATH",
+                   help="Pickle the fitted static Cox model to PATH after fitting")
+    p.add_argument("--load-model", type=str, default=None, metavar="PATH",
+                   help="Load a pickled static Cox model; skips data load, fit, and PH tests")
+    p.add_argument("--skip-tests", action="store_true",
+                   help="Skip Schoenfeld + log-log PH tests (faster for sensitivity runs)")
     return p.parse_args()
 
 
@@ -351,12 +372,21 @@ def main() -> None:
     sample = args.sample
 
     # ── (i) & (ii): Static origination model ──────────────────────────────────
-    print("\n[1/4] Loading static origination data ...")
-    raw = load_static(years, sample)
-    df  = preprocess(raw.copy())
+    if args.load_model:
+        print("\n[1/4] Loading cached static model (skipping data load + fit) ...")
+        cph_static = load_model(args.load_model)
+        raw = None
+        df  = None
+    else:
+        print("\n[1/4] Loading static origination data ...")
+        raw = load_static(years, sample)
+        df  = preprocess(raw.copy())
 
-    cph_static = fit_cox(df, label="Static origination features",
-                         penalizer=args.penalizer)
+        cph_static = fit_cox(df, label="Static origination features",
+                             penalizer=args.penalizer)
+
+        if args.save_model:
+            save_model(cph_static, args.save_model)
 
     # Save coefficient table
     coef_path = FIGURES_DIR / "partB_coef_table.csv"
@@ -378,28 +408,33 @@ def main() -> None:
     )
 
     # ── (iii): Test PH assumption ──────────────────────────────────────────────
-    print("\n[2/4] Testing proportional hazards assumption ...")
+    run_tests = not (args.skip_tests or args.load_model)
+    if run_tests:
+        print("\n[2/4] Testing proportional hazards assumption ...")
 
-    schoenfeld_df = plot_schoenfeld(
-        cph_static, df,
-        save_path=FIGURES_DIR / "partB_schoenfeld.png",
-    )
-    schoenfeld_df.to_csv(FIGURES_DIR / "partB_schoenfeld_results.csv")
-
-    # Log-log survival plots for key numeric covariates
-    print("\n  Log-log survival plots ...")
-    for cov, spec in LOGLOG_SPECS.items():
-        if cov not in raw.columns:
-            continue
-        plot_loglog(
-            raw,
-            covariate=cov,
-            breaks=spec["breaks"],
-            labels=spec["labels"],
-            save_path=FIGURES_DIR / f"partB_loglog_{cov}.png",
+        schoenfeld_df = plot_schoenfeld(
+            cph_static, df,
+            save_path=FIGURES_DIR / "partB_schoenfeld.png",
         )
+        schoenfeld_df.to_csv(FIGURES_DIR / "partB_schoenfeld_results.csv")
 
-    del df
+        # Log-log survival plots for key numeric covariates
+        print("\n  Log-log survival plots ...")
+        for cov, spec in LOGLOG_SPECS.items():
+            if cov not in raw.columns:
+                continue
+            plot_loglog(
+                raw,
+                covariate=cov,
+                breaks=spec["breaks"],
+                labels=spec["labels"],
+                save_path=FIGURES_DIR / f"partB_loglog_{cov}.png",
+            )
+    else:
+        print("\n[2/4] Skipping PH tests (--skip-tests or --load-model).")
+
+    if df is not None:
+        del df
     gc.collect()
 
     # ── (iv): Macro-covariate model ────────────────────────────────────────────

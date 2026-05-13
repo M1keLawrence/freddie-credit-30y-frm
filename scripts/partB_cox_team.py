@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import pickle
 import sys
 from pathlib import Path
 
@@ -301,6 +302,22 @@ def plot_baseline_hazard(cph: CoxPHFitter) -> None:
     print(f"  saved: {save_path.name}")
 
 
+# ── Model cache helpers ─────────────────────────────────────────────────────────
+
+def save_model(cph: CoxPHFitter, impute_map: dict, train_feature_cols: list, path: str) -> None:
+    bundle = {"cph": cph, "impute_map": impute_map, "train_feature_cols": train_feature_cols}
+    with open(path, "wb") as f:
+        pickle.dump(bundle, f)
+    print(f"  model bundle cached: {path}")
+
+
+def load_model(path: str) -> tuple:
+    print(f"  loading cached model bundle: {path}")
+    with open(path, "rb") as f:
+        bundle = pickle.load(f)
+    return bundle["cph"], bundle["impute_map"], bundle["train_feature_cols"]
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def parse_args() -> argparse.Namespace:
@@ -309,31 +326,42 @@ def parse_args() -> argparse.Namespace:
                    help=f"L2 penalizer for CoxPHFitter (default: {PENALIZER})")
     p.add_argument("--no-plots", action="store_true",
                    help="Skip diagnostic plots (faster scoring-only run)")
+    p.add_argument("--save-model", type=str, default=None, metavar="PATH",
+                   help="Pickle the fitted model bundle (cph + impute_map + feature_cols) to PATH")
+    p.add_argument("--load-model", type=str, default=None, metavar="PATH",
+                   help="Load a pickled model bundle; skips train data load and fit")
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
 
-    # ── [1/3] Fit Cox on training data ────────────────────────────────────────
-    print("\n[1/3] Loading and preprocessing team_train.parquet ...")
-    train_raw = load_parquet("team_train.parquet")
-    train_df, impute_map, train_feature_cols = preprocess_train(train_raw)
-    del train_raw
-    gc.collect()
+    # ── [1/3] Fit Cox on training data (or load from cache) ───────────────────
+    if args.load_model:
+        print("\n[1/3] Loading cached model bundle (skipping train data load + fit) ...")
+        cph, impute_map, train_feature_cols = load_model(args.load_model)
+    else:
+        print("\n[1/3] Loading and preprocessing team_train.parquet ...")
+        train_raw = load_parquet("team_train.parquet")
+        train_df, impute_map, train_feature_cols = preprocess_train(train_raw)
+        del train_raw
+        gc.collect()
 
-    cph = fit_cox(train_df, penalizer=args.penalizer)
+        cph = fit_cox(train_df, penalizer=args.penalizer)
 
-    coef_path = FIGURES_DIR / "partB_team_coef_table.csv"
-    cph.summary.to_csv(coef_path)
-    print(f"\n  coefficient table: {coef_path}")
+        coef_path = FIGURES_DIR / "partB_team_coef_table.csv"
+        cph.summary.to_csv(coef_path)
+        print(f"\n  coefficient table: {coef_path}")
 
-    if not args.no_plots:
-        plot_hazard_ratios(cph)
-        plot_baseline_hazard(cph)
+        if args.save_model:
+            save_model(cph, impute_map, train_feature_cols, args.save_model)
 
-    del train_df
-    gc.collect()
+        if not args.no_plots:
+            plot_hazard_ratios(cph)
+            plot_baseline_hazard(cph)
+
+        del train_df
+        gc.collect()
 
     # ── [2/3] Score all evaluation files ──────────────────────────────────────
     print("\n[2/3] Scoring evaluation files ...")
