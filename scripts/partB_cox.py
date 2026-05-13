@@ -55,14 +55,21 @@ EVENT_COL    = "prepay_observed"
 
 # Static origination features for model (i)
 STATIC_FEATURES = [
-    "fico",          # credit score         — higher → easier to refi → higher prepay
-    "ltv",           # loan-to-value        — higher → less equity → harder to refi
-    "dti",           # debt-to-income       — higher → harder to qualify for new loan
-    "orig_rate",     # original interest rate — higher → bigger refi incentive later
-    "loan_purpose",  # P=purchase, C=cash-out, N=no-cash refi
-    "channel",       # R=retail, B=broker, T=correspondent, C=other
-    "n_borrowers",   # 1 or 2 borrowers
-    "vintage_year",  # origination year — absorbs rate-cycle era
+    "fico",                  # credit score         — higher → easier to refi → higher prepay
+    "ltv",                   # loan-to-value        — higher → less equity → harder to refi
+    "dti",                   # debt-to-income       — higher → harder to qualify for new loan
+    "orig_rate",             # original interest rate — higher → bigger refi incentive later
+    "orig_upb",              # original loan balance — larger loans have stronger refi incentive
+    "loan_purpose",          # P=purchase, C=cash-out, N=no-cash refi
+    "channel",               # R=retail, B=broker, T=correspondent, C=other
+    "n_borrowers",           # 1 or 2 borrowers
+    "n_units",               # 1–4 units
+    "mi_pct",                # mortgage insurance % — affects refi feasibility
+    "occupancy",             # O=owner, I=investor, S=second home
+    "prop_type",             # SF/CO/PU/MH/CP
+    "first_time_homebuyer",  # Y/N
+    "state",                 # 50 states + territories — regional rate environment
+    "vintage_year",          # origination year — absorbs rate-cycle era
 ]
 
 # Macro series available in fred_monthly.parquet
@@ -152,7 +159,8 @@ def load_with_macro(years: list[int], sample: int) -> pd.DataFrame:
 
 def preprocess(df: pd.DataFrame) -> pd.DataFrame:
     """One-hot encode categoricals and drop rows with nulls in any feature."""
-    cat_cols = [c for c in ["loan_purpose", "channel"] if c in df.columns]
+    cat_cols = [c for c in ["loan_purpose", "channel", "occupancy", "prop_type",
+                            "first_time_homebuyer", "state"] if c in df.columns]
     if cat_cols:
         df = pd.get_dummies(df, columns=cat_cols, drop_first=True, dtype=float)
     feature_cols = [c for c in df.columns if c not in [DURATION_COL, EVENT_COL]]
@@ -215,26 +223,18 @@ def plot_hazard_ratios(cph: CoxPHFitter, title: str, save_path: Path) -> None:
     print(f"  saved: {save_path.name}")
 
 
-SCHOENFELD_MAX = 200_000   # test is valid at 200K; no benefit beyond that at these n
-
-
 def plot_schoenfeld(cph: CoxPHFitter, df: pd.DataFrame, save_path: Path) -> pd.DataFrame:
     """
     Schoenfeld residuals test for the PH assumption.
     Bar chart of -log10(p); red = violation at 5% level.
     Returns the test summary DataFrame.
     """
-    test_df = df
-    if len(df) > SCHOENFELD_MAX:
-        test_df = df.sample(n=SCHOENFELD_MAX, random_state=RANDOM_SEED)
-        print(f"  subsampled to {SCHOENFELD_MAX:,} for Schoenfeld test "
-              f"(p-values are effectively 0 at n={len(df):,} anyway)")
-    results = proportional_hazard_test(cph, test_df, time_transform="rank")
+    results = proportional_hazard_test(cph, df, time_transform="rank")
     tdf = results.summary.copy()
     tdf["-log10(p)"] = -np.log10(tdf["p"].clip(lower=1e-300))
     tdf = tdf.sort_values("-log10(p)", ascending=True)
 
-    colors = ["tab:red" if p < 0.05 else "tab:steelblue" for p in tdf["p"]]
+    colors = ["tab:red" if p < 0.05 else "steelblue" for p in tdf["p"]]
 
     fig, ax = plt.subplots(figsize=(9, max(5, len(tdf) * 0.45)))
     ax.barh(tdf.index, tdf["-log10(p)"], color=colors, alpha=0.82)
